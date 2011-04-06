@@ -2,6 +2,21 @@
 
 DataMapper plugin for creating and organizing lists.
 
+== Why Forked?
+
+Experiment with two lists in a single model.
+This pluralizes 'is-list' which may be undesirable.
+Tests/most doco has not yet been updated.
+Repair list functionality not yet implemented (removed)
+
+Syntax:
+
+  is :list, :property => :second_position, ...
+  
+  item.move(:highest, :second_position)
+
+If the property is not explicitly specified, :position is assumed.
+
 == Installation
 
 === Stable

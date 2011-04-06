@@ -8,6 +8,21 @@ module DataMapper
     #
     # DataMapper plugin for creating and organizing lists.
     #
+    # == Why Forked?
+    # 
+    # Experiment with two lists in a single model.
+    # This pluralizes 'is-list' which may be undesirable.
+    # Tests/most doco has not yet been updated.
+    # Repair list functionality not yet implemented (removed)
+    # 
+    # Syntax:
+    # 
+    #   is :list, :property => :second_position, ...
+    #   
+    #   item.move(:highest, :second_position)
+    # 
+    # If the property is not explicitly specified, :position is assumed.
+    #
     # == Installation
     #
     # === Stable
@@ -221,9 +236,9 @@ module DataMapper
     # If something is not behaving intuitively, it is a bug, and should be reported.
     # Report it here: http://datamapper.lighthouseapp.com/
     #
-
+    
     module List
-
+      DefaultProperty = :position
       ##
       # method for making your model a list.
       #  TODO:: this explanation is confusing. Need to translate into literal code
@@ -237,6 +252,7 @@ module DataMapper
       #   is :list                                      # put this in your model to make it act as a list.
       #   is :list, :scope => :user_id                  # you can also define scopes
       #   is :list, :scope => [ :user_id, :context_id ] # also works with multiple params
+      #   is :list, :scope => [ :user_id, :context_id ], :property => :second_position
       #
       # @param options <Hash> a hash of options
       #
@@ -244,42 +260,46 @@ module DataMapper
       #
       # @api public
       def is_list(options={})
-        options = { :scope => [], :first => 1 }.merge(options)
-
+        options = { :scope => [], :first => 1, :property => DefaultProperty }.merge(options)
+        
         # coerce the scope into an Array
         options[:scope] = Array(options[:scope])
-
+        
         extend  DataMapper::Is::List::ClassMethods
         include DataMapper::Is::List::InstanceMethods
-
-        unless properties.any? { |p| p.name == :position && p.primitive == Integer }
-          property :position, Integer
+        
+        unless properties.any? { |p| p.name == options[:property] && p.primitive == Integer }
+          property options[:property], Integer
         end
-
-        @list_options = options
-
+        
+        @lists_options ||= {}
+        @lists_options[options[:property]] = options.select {|k,v| k != :property}
+        
         before :create do
           # if a position has been set before save, then insert it at the position and
           # move the other items in the list accordingly, else if no position has been set
-          # then set position to bottom of list
-          __send__(:move_without_saving, position || :lowest)
-
+          # then set position to bottom of list.
+          # Do this for all lists
+          __send__(:move_without_saving, attributes[options[:property]] || :lowest, options[:property])
+          
           # on create, set moved to false so we can move the list item after creating it
-          # self.moved = false
+          #self.moved = {}
+          #@lists_options.keys.each do |k|
+          #  self.moved[k] = false
+          #end
         end
-
+        
         before :update do
           # a (new) position has been set => move item to this position (only if position has been set manually)
           # the scope has changed => detach from old list, and possibly move into position
           # the scope and position has changed => detach from old, move to pos in new
-
+          
           # if the scope has changed, we need to detach our item from the old list
-          if list_scope != original_list_scope
-            newpos = position
-            detach(original_list_scope) # removing from old list
-            __send__(:move_without_saving, newpos || :lowest) # moving to pos or bottom of new list
+          if lists_scope(options[:property]) != original_lists_scope(options[:property])
+            detach(prop, original_lists_scope(prop) ) # removing from old list
+            __send__(:move_without_saving, attributes[options[:property]] || :lowest, options[:property]) # moving to pos or bottom of new list
           end
-
+          
           #  NOTE:: uncommenting the following creates a large number of extra un-wanted SQL queries
           #  hence the commenting out of it.
           # if attribute_dirty?(:position) && !moved
@@ -288,21 +308,21 @@ module DataMapper
           # # on update, clean moved to prepare for the next change
           # self.moved = false
         end
-
+        
         before :destroy do
           detach
         end
-
+        
         # we need to make sure that STI-models will inherit the list_scope.
         after_class_method :inherited do |retval, target|
-          target.instance_variable_set(:@list_options, @list_options.dup)
+          target.instance_variable_set(@lists_options, @lists_options.dup)
         end
-
+        
       end # is_list
-
+      
       module ClassMethods
-        attr_reader :list_options
-
+        attr_reader :lists_options
+        
         ##
         # use this function to repair / build your lists.
         #
@@ -313,22 +333,22 @@ module DataMapper
         # @param scope [Hash]
         #
         # @api public
-        def repair_list(scope = {})
-          return false unless scope.keys.all?{ |s| list_options[:scope].include?(s) || s == :order }
-          retval = true
-          all({ :order => [ :position.asc ] | default_order }.merge(scope)).each_with_index do |item, index|
-            retval &= item.update(:position => index.succ)
-          end
-          retval
-        end
-
+        #def repair_list(scope = {})
+        #  return false unless scope.keys.all?{ |s| list_options[:scope].include?(s) || s == :order }
+        #  retval = true
+        #  all({ :order => [ :position.asc ] | default_order }.merge(scope)).each_with_index do |item, index|
+        #    retval &= item.update(:position => index.succ)
+        #  end
+        #  retval
+        #end
+        
       end
-
+      
       module InstanceMethods
-
+        
         # @api semipublic
         attr_accessor :moved
-
+        
         ##
         # returns the scope of the current list item
         #
@@ -339,10 +359,10 @@ module DataMapper
         #
         #
         # @api semipublic
-        def list_scope
-          Hash[ model.list_options[:scope].map { |p| [ p, attribute_get(p) ] } ]
+        def lists_scope prop = DefaultProperty
+          Hash[ model.lists_options[prop][:scope].map { |p| [ p, attribute_get(p) ] } ]
         end
-
+        
         ##
         # returns the _original_ scope of the current list item
         #
@@ -354,13 +374,13 @@ module DataMapper
         #   item.original_list_scope  => { :user_id => 1 }
         #
         # @api semipublic
-        def original_list_scope
-          pairs = model.list_options[:scope].map do |p|
+        def original_lists_scope prop = DefaultProperty
+          pairs = model.lists_options[prop][:scope].map do |p|
             [ p, (property = properties[p]) && original_attributes.key?(property) ? original_attributes[property] : attribute_get(p) ]
           end
           Hash[ pairs ]
         end
-
+        
         ##
         # returns the query conditions
         #
@@ -370,10 +390,10 @@ module DataMapper
         #   Todo.get(2).list_query => { :user_id => 1, :order => [:position] }
         #
         # @api semipublic
-        def list_query
-          list_scope.merge(:order => [ :position ])
+        def list_query prop = DefaultProperty
+          lists_scope(prop).merge(:order => [ prop ])
         end
-
+        
         ##
         # returns the list the current item belongs to
         #
@@ -386,18 +406,18 @@ module DataMapper
         #   Todo.get(2).list(:user_id => 2 )  => [ list of Todo items with user_id => 2]
         #
         # @api public
-        def list(scope = list_query)
+        def list(prop = DefaultProperty, scope = list_query(prop))
           model.all(scope)
         end
-
+        
         ##
         # repair the list this item belongs to
         #
         # @api public
-        def repair_list
-          model.repair_list(list_scope)
-        end
-
+        #def repair_list prop = :position
+        #  model.repair_list(list_scope(prop))
+        #end
+        
         ##
         # reorder the list this item belongs to
         #
@@ -409,10 +429,10 @@ module DataMapper
         #   Todo.get(2).reorder_list([:title.asc])
         #
         # @api public
-        def reorder_list(order)
-          model.repair_list(list_scope.merge(:order => order))
-        end
-
+        #def reorder_list(prop, order)
+        #  model.repair_list(list_scope(prop).merge(:order => order))
+        #end
+        
         ##
         # detaches a list item from the list, essentially setting the position as nil
         #
@@ -423,11 +443,16 @@ module DataMapper
         # @example [Usage]
         #
         # @api public
-        def detach(scope = list_scope)
-          list(scope).all(:position.gt => position).adjust!({ :position => -1 },true)
-          self.position = nil
+        def detach(prop = DefaultProperty, scope = list_scope)
+          list(prop, scope).all(
+            prop.gt => attributes[prop]
+          ).adjust!(
+            { prop => -1 },
+            true
+          )
+          attribute_set prop, nil
         end
-
+        
         ##
         # moves an item from one list to another
         #
@@ -441,14 +466,14 @@ module DataMapper
         # @return <Boolean> True/False based upon result
         #
         # @api public
-        def move_to_list(scope, pos = nil)
-          detach   # remove from current list
-          attribute_set(model.list_options[:scope][0], scope.to_i) # set new scope
+        def move_to_list(prop, scope, pos = nil)
+          detach(prop) # remove from current list
+          attribute_set(model.lists_options[prop][:scope][0], scope.to_i) # set new scope
           save     # save progress. Needed to get the positions correct.
           reload   # get a fresh new start
-          move(pos) unless pos.nil?
+          move(pos, prop) unless pos.nil?
         end
-
+        
         ##
         # finds the previous _higher_ item in the list (lower in number position)
         #
@@ -460,12 +485,12 @@ module DataMapper
         #   Todo.get(2).previous_item  => Todo.get(1)
         #
         # @api public
-        def left_sibling
-          list.reverse.first(:position.lt => position)
+        def left_sibling prop = DefaultProperty
+          list(prop).reverse.first( prop.lt => attribute_read(prop) )
         end
         alias_method :higher_item, :left_sibling
         alias_method :previous_item, :left_sibling
-
+        
         ##
         # finds the next _lower_ item in the list (higher in number position)
         #
@@ -477,13 +502,13 @@ module DataMapper
         #   Todo.get(2).next_item  => Todo.get(3)
         #
         # @api public
-        def right_sibling
-          list.first(:position.gt => position)
+        def right_sibling prop = DefaultProperty
+          list(prop).first( prop.lt => attribute_read(prop) )
         end
         alias_method :lower_item, :right_sibling
         alias_method :next_item, :right_sibling
-
-
+        
+        
         ##
         # move item to a position in the list. position should _only_ be changed through this
         #
@@ -514,13 +539,13 @@ module DataMapper
         # @see move_without_saving
         #
         # @api public
-        def move(vector)
-          move_without_saving(vector) && save
+        def move(vector, prop = DefaultProperty)
+          move_without_saving(vector, prop) && save
         end
-
-
+        
+        
         private
-
+        
           ##
           # does all the actual movement in #move, but does not save afterwards. this is used internally in
           # before :create / :update. Should not be used by organic beings.
@@ -528,22 +553,29 @@ module DataMapper
           # @see move
           #
           # @api private
-          def move_without_saving(vector)
+          def move_without_saving(vector, prop)
             if vector.kind_of?(Hash)
               action, object = vector.keys[0], vector.values[0]
             else
               action = vector
             end
-
+            
+            current_pos = attributes[prop]
+            
             # set the start position to 1 or, if offset in the list_options is :list, :first => X
-            minpos = model.list_options[:first]
-
+            minpos = model.lists_options[prop][:first]
+            
             # the previous position (if changed) else current position
-            prepos = original_attributes[properties[:position]] || position
-
+            prepos = original_attributes[properties[prop]] || current_pos
+            
             # set the last position in the list or previous position if the last item
-            maxpos = (last = list.last) ? (last == self ? prepos : last.position + 1) : minpos
-
+            last = list(prop).last
+            maxpos = if last
+              last == self ? prepos : last.attributes[prop] + 1
+            else
+              minpos
+            end
+            
             newpos = case action
               when :highest     then minpos
               when :top         then minpos
@@ -556,20 +588,20 @@ module DataMapper
                 # -- the same as self
                 # -- already below self
                 # -- higher up than self (lower number in list)
-                ( (self == object) or (object.position > self.position) ) ? self.position : object.position
-
+                ( (self == object) or (object.attributes[prop] > self.attributes[prop]) ) ? self.attributes[prop] : object.attributes[prop]
+                
               when :below
                 # the object given, can either be:
                 # -- the same as self
                 # -- already above self
                 # -- lower than self (higher number in list)
-                ( self == object or (object.position < self.position) ) ? self.position : object.position + 1
-
+                ( self == object or (object.attributes[prop] < self.attributes[prop]) ) ? self.attributes[prop] : object.attributes[prop] + 1
+                
               when :to
                 # can only move within top and bottom positions of list
                 # -- .move(:to => 2 ) Hash with FixNum
                 # -- .move(:to => '2' ) Hash with String
-
+                
                 # NOTE:: sensitive functionality
                 # maxpos is incremented above, so decrement by 1 to get true maxpos
                 # minpos is fixed, so just take the object position value given
@@ -580,7 +612,7 @@ module DataMapper
                 else
                   [ minpos, [ obj, maxpos ].min ].max
                 end
-
+              
               else
                 raise ArgumentError, "unrecognized vector: [#{action}]. Please check your spelling and/or the docs" if action.is_a?(Symbol)
                 # -- .move(2) as FixNum only
@@ -591,26 +623,28 @@ module DataMapper
                   [ action.to_i, maxpos - 1 ].min
                 end
             end
-
+            
             # don't move if already at the position
             return false if [ :lower, :down, :higher, :up, :top, :bottom, :highest, :lowest, :above, :below ].include?(action) && newpos == prepos
             return false if !newpos || ([ :above, :below ].include?(action) && list_scope != object.list_scope)
-            return true  if newpos == position && position == prepos || (newpos == maxpos && position == maxpos - 1)
-
-            if !position
-              list.all(:position.gte => newpos).adjust!({ :position => 1 }, true) unless action =~ /:(lowest|bottom)/
+            return true  if newpos == current_pos && current_pos == prepos || (newpos == maxpos && current_pos == maxpos - 1)
+            
+            if !current_pos
+              list(prop).all(prop.gte => newpos).adjust!({ prop => 1 }, true) unless action =~ /:(lowest|bottom)/
             elsif newpos > prepos
               newpos -= 1 if [:lowest,:bottom,:above,:below].include?(action)
-              list.all(:position => prepos..newpos).adjust!({ :position => -1 }, true)
+              list(prop).all(prop => prepos..newpos).adjust!({ prop => -1 }, true)
             elsif newpos < prepos
-              list.all(:position => newpos..prepos).adjust!({ :position => 1  }, true)
+              list(prop).all(prop => newpos..prepos).adjust!({ prop => 1  }, true)
             end
-
-            self.position = newpos
-            self.moved = true
+            
+            self.attributes = Hash[ prop, newpos ]
+            #raise 'newpos less than first' if newpos < model.lists_options[prop][:first]
+            self.moved ||= {}
+            self.moved[prop] = true
             true
           end # move_without_saving
-
+          
       end # InstanceMethods
     end # List
   end # Is
